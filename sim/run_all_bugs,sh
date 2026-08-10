@@ -1,0 +1,72 @@
+#!/bin/bash
+#=============================================================================
+# run_all_bugs.sh
+#
+# Runs: baseline (no bug) + each of the 7 bugs, through BOTH the UVM flow
+# and the two VC Static apps, and appends one row per (bug, method) pair to
+# results/summary.csv. This is the script that actually produces the
+# data-backed comparison table for your writeup.
+#
+# Requires: bug_defines.svh temporarily rewritten per iteration (this script
+# does that with sed and restores the original afterward), VCS + UVM-1.2 and
+# VC Static both on PATH.
+#=============================================================================
+set -e
+cd "$(dirname "$0")"
+
+BUGDEFS_FILE=../rtl/bug_defines.svh
+BACKUP_FILE=/tmp/bug_defines.svh.bak
+cp "$BUGDEFS_FILE" "$BACKUP_FILE"
+
+RESULTS_DIR=results
+mkdir -p "$RESULTS_DIR"
+CSV="$RESULTS_DIR/summary.csv"
+echo "bug,uvm_result,uvm_errors,lint_high_sev_hits,cdc_high_sev_hits" > "$CSV"
+
+BUGS=(BASELINE BUG1_CDC_NO_SYNC BUG2_CDC_SINGLE_FF BUG3_LINT_WIDTH_MISMATCH \
+      BUG4_LINT_INFERRED_LATCH BUG5_LINT_MULTIDRIVEN BUG6_FUNC_OFFBYONE \
+      BUG7_FUNC_W1C_BROKEN)
+
+set_bug () {
+  local bug=$1
+  # comment everything out first
+  sed -i 's/^`define BUG/\/\/ `define BUG/' "$BUGDEFS_FILE"
+  sed -i 's/^\/\/ `define BUG/\/\/ `define BUG/' "$BUGDEFS_FILE"
+  if [ "$bug" != "BASELINE" ]; then
+    sed -i "s/^\/\/ \`define ${bug}\$/\`define ${bug}/" "$BUGDEFS_FILE"
+  fi
+}
+
+for bug in "${BUGS[@]}"; do
+  echo "=========================================="
+  echo " Bug under test: $bug"
+  echo "=========================================="
+  set_bug "$bug"
+
+  # ---- UVM run ----
+  uvm_errors=0
+  uvm_result="PASS"
+  if make -f Makefile clean compile run > "$RESULTS_DIR/${bug}_uvm.log" 2>&1; then
+    uvm_errors=$(grep -c "UVM_ERROR" "$RESULTS_DIR/${bug}_uvm.log" || true)
+    [ "$uvm_errors" -gt 0 ] && uvm_result="FAIL"
+  else
+    uvm_result="COMPILE_ERROR"
+  fi
+
+  # ---- static runs ----
+  lint_hits=0
+  cdc_hits=0
+  if (cd ../static && vcst -f lint.tcl) > "$RESULTS_DIR/${bug}_lint.log" 2>&1; then
+    lint_hits=$(grep -c "severity: HIGH" "$RESULTS_DIR/${bug}_lint.log" || true)
+  fi
+  if (cd ../static && vcst -f cdc.tcl) > "$RESULTS_DIR/${bug}_cdc.log" 2>&1; then
+    cdc_hits=$(grep -c "severity: HIGH" "$RESULTS_DIR/${bug}_cdc.log" || true)
+  fi
+
+  echo "${bug},${uvm_result},${uvm_errors},${lint_hits},${cdc_hits}" >> "$CSV"
+done
+
+cp "$BACKUP_FILE" "$BUGDEFS_FILE"
+echo ""
+echo "Done. Results table: $CSV"
+column -s, -t "$CSV"
